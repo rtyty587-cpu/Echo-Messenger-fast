@@ -1,0 +1,1523 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0"/>
+<title>ECHO — Secure Messenger</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@700;900&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet"/>
+
+<!-- Agora RTC SDK for real video/audio calls -->
+<script src="https://download.agora.io/sdk/release/AgoraRTC_N-4.20.0.js"></script>
+
+<!-- Firebase -->
+<script type="module">
+import { initializeApp }           from "https://www.gstatic.com/firebasejs/10.12.0/firebase-app.js";
+import { getAuth, createUserWithEmailAndPassword, signInWithEmailAndPassword,
+         signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-auth.js";
+import { getFirestore, doc, getDoc, setDoc, updateDoc, deleteDoc,
+         collection, query, orderBy, onSnapshot, addDoc,
+         serverTimestamp, arrayUnion, arrayRemove, getDocs, where }
+  from "https://www.gstatic.com/firebasejs/10.12.0/firebase-firestore.js";
+
+// ══════════════════════════════════════════════════════════
+//  🔥  PASTE YOUR FIREBASE CONFIG HERE
+//  1. Go to console.firebase.google.com
+//  2. Create project → Add Web App
+//  3. Copy the firebaseConfig object below
+//  4. Enable Auth (Email/Password) + Firestore in console
+// ══════════════════════════════════════════════════════════
+const firebaseConfig = {
+  apiKey:            "AIzaSyD3gsidw-GvyUMivTy5atN7UCzoGNJPr9s",
+  authDomain:        "echo-messenger-a962a.firebaseapp.com",
+  projectId:         "echo-messenger-a962a",
+  storageBucket:     "echo-messenger-a962a.firebasestorage.app",
+  messagingSenderId: "118534789256",
+  appId:             "1:118534789256:web:ef25d8d2578676bf50673d",
+};
+
+// ══════════════════════════════════════════════════════════
+//  📹  AGORA CONFIG FOR VIDEO CALLS
+//  1. Go to console.agora.io → Create account (free)
+//  2. Create project → Get App ID
+//  3. Paste it below (Free: 10,000 minutes/month)
+// ══════════════════════════════════════════════════════════
+const AGORA_APP_ID = "3d701c1657ab449e988369411401be3c";
+
+const FB_READY = firebaseConfig.apiKey !== "PASTE_YOUR_API_KEY";
+const AGORA_READY = AGORA_APP_ID !== "PASTE_YOUR_AGORA_APP_ID";
+window._FB_READY = FB_READY;
+window._AGORA_READY = AGORA_READY;
+
+if (FB_READY) {
+  const app  = initializeApp(firebaseConfig);
+  const auth = getAuth(app);
+  const db   = getFirestore(app);
+
+  // ── Expose to app ──
+  window._fbAuth = auth;
+  window._fbDb   = db;
+  window._fb = {
+    // Auth
+    signUp: (email, pass) => createUserWithEmailAndPassword(auth, email, pass),
+    signIn: (email, pass) => signInWithEmailAndPassword(auth, email, pass),
+    signOut: () => signOut(auth),
+    onAuth: (cb) => onAuthStateChanged(auth, cb),
+
+    // User profile
+    getUser:  (uid) => getDoc(doc(db,"users",uid)),
+    setUser:  (uid, data) => setDoc(doc(db,"users",uid), data, {merge:true}),
+    findByCode: async (code) => {
+      const q = query(collection(db,"users"), where("code","==",code));
+      const snap = await getDocs(q);
+      return snap.empty ? null : {...snap.docs[0].data(), uid: snap.docs[0].id};
+    },
+    addContact: (uid, contactUid) => updateDoc(doc(db,"users",uid), {contacts: arrayUnion(contactUid)}),
+
+    // Messages — realtime listener
+    listenMessages: (chatKey, cb) => {
+      const q = query(collection(db,"chats",chatKey,"messages"), orderBy("ts","asc"));
+      return onSnapshot(q, snap => cb(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    },
+    sendMessage: (chatKey, msg) => addDoc(collection(db,"chats",chatKey,"messages"), msg),
+    updateMessage: (chatKey, msgId, data) => setDoc(doc(db,"chats",chatKey,"messages",msgId), data, {merge:true}),
+    deleteMessage: (chatKey, msgId) => deleteDoc(doc(db,"chats",chatKey,"messages",msgId)),
+
+    // Feed — realtime
+    listenFeed: (cb) => {
+      const q = query(collection(db,"feed"), orderBy("ts","desc"));
+      return onSnapshot(q, snap => cb(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    },
+    addPost: (post) => addDoc(collection(db,"feed"), post),
+    updatePost: (id, data) => setDoc(doc(db,"feed",id), data, {merge:true}),
+
+    // Other users listener (for contacts)
+    listenUser: (uid, cb) => onSnapshot(doc(db,"users",uid), snap => snap.exists() && cb({uid,...snap.data()})),
+
+    // Channels — realtime
+    listenChannels: (cb) => {
+      const q = query(collection(db,"channels"), orderBy("createdAt","desc"));
+      return onSnapshot(q, snap => cb(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    },
+    listenMyChannels: (uid, cb) => {
+      const q = query(collection(db,"channels"), where("creator","==",uid), orderBy("createdAt","desc"));
+      return onSnapshot(q, snap => cb(snap.docs.map(d=>({id:d.id,...d.data()}))));
+    },
+    createChannel: (channelData) => addDoc(collection(db,"channels"), channelData),
+    joinChannel: (channelId, uid) => updateDoc(doc(db,"channels",channelId), {members: arrayUnion(uid)}),
+    leaveChannel: (channelId, uid) => updateDoc(doc(db,"channels",channelId), {members: arrayRemove(uid)}),
+
+    serverTs: () => serverTimestamp(),
+  };
+}
+
+// Signal React app that Firebase is ready
+window.dispatchEvent(new Event("fb-ready"));
+</script>
+
+<style>
+*,*::before,*::after{margin:0;padding:0;box-sizing:border-box;}
+html,body{width:100%;height:100%;overflow:hidden;background:#000;font-family:'Inter',sans-serif;color:#e8e8e8;}
+#root{width:100vw;height:100dvh;}
+::-webkit-scrollbar{width:3px;}::-webkit-scrollbar-thumb{background:rgba(255,140,0,.3);border-radius:4px;}
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<!-- React -->
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+
+<script type="text/babel" data-type="module">
+const {useState,useEffect,useRef,useCallback,useMemo}=React;
+
+// ── UTILS ────────────────────────────────────────────────────
+const enc  = t=>`§${btoa(unescape(encodeURIComponent(t)))}`;
+const dec  = t=>{ if(!t||!t.startsWith("§"))return t; try{return decodeURIComponent(escape(atob(t.slice(1))))}catch{return t} };
+const gcode= ()=>Math.random().toString(36).slice(2,11);
+const ckey = (a,b)=>[a,b].sort().join("-");
+const ago  = ts=>{ if(!ts)return""; const d=Date.now()-(ts?.seconds?ts.seconds*1000:ts); if(d<60000)return"now"; if(d<3600000)return`${Math.floor(d/60000)}m`; if(d<86400000)return`${Math.floor(d/3600000)}h`; return`${Math.floor(d/86400000)}d`; };
+const fmtT = s=>`${String(Math.floor(s/60)).padStart(2,"0")}:${String(s%60).padStart(2,"0")}`;
+const tsMs = ts=>ts?.seconds?ts.seconds*1000:ts||Date.now();
+
+const EMOJIS=["🔥","⚡","💀","🌊","👾","🛡️","🌙","❤️","💯","😂"];
+const AVAS =["🦊","🐺","👻","🌟","🦋","🐉","👾","🤖","🦁","🐯","🔥","⚡","🌈","🎯","💎","🚀"];
+const BOT  =["Absolutely 🔥","On it ⚡","That's fire 👾","ECHO never misses 🌙","Received 🛡️","lmaooo 💀","Facts 💯","No way bro ⚡"];
+const CHANNELS_DATA=[
+  {id:"ch1",name:"ECHO Central",desc:"Official broadcast",members:4821,joined:true, code:"ECHO001",icon:"⚡"},
+  {id:"ch2",name:"Cyber Design", desc:"Futuristic UI/UX",  members:1337,joined:false,code:"DESIGN42",icon:"🎨"},
+  {id:"ch3",name:"NightOwls",    desc:"After-midnight devs",members:892, joined:true, code:"OWL247",  icon:"🦉"},
+  {id:"ch4",name:"CryptoVault",  desc:"Privacy & security", members:3201,joined:false,code:"VAULT99", icon:"🔐"},
+];
+
+// ── CSS ──────────────────────────────────────────────────────
+const CSS=`
+#er{width:100vw;height:100dvh;display:flex;flex-direction:column;background:#000;overflow:hidden;position:relative;}
+.bg-grid{position:fixed;inset:0;pointer-events:none;z-index:0;background-image:linear-gradient(rgba(255,140,0,.035) 1px,transparent 1px),linear-gradient(90deg,rgba(255,140,0,.035) 1px,transparent 1px);background-size:56px 56px;animation:gridMove 18s linear infinite;}
+@keyframes gridMove{to{background-position:56px 56px;}}
+.orb{position:fixed;border-radius:50%;pointer-events:none;filter:blur(90px);z-index:0;}
+.orb1{width:480px;height:480px;background:rgba(255,140,0,.055);top:-120px;left:-120px;animation:orbF 9s ease-in-out infinite;}
+.orb2{width:360px;height:360px;background:rgba(255,80,0,.04);bottom:-80px;right:-80px;animation:orbF 11s ease-in-out infinite reverse;}
+@keyframes orbF{0%,100%{transform:translate(0,0)}50%{transform:translate(28px,18px)}}
+
+/* SETUP SCREEN */
+.setup-wrap{width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:20px;}
+.setup-card{width:100%;max-width:600px;background:rgba(8,8,8,.97);border:1px solid rgba(255,140,0,.2);border-radius:22px;padding:36px 32px;position:relative;z-index:2;}
+.setup-logo{font-family:'Orbitron',monospace;font-size:36px;font-weight:900;color:#FF8C00;letter-spacing:8px;text-align:center;margin-bottom:6px;text-shadow:0 0 24px rgba(255,140,0,.8);}
+.setup-step{background:rgba(255,140,0,.04);border:1px solid rgba(255,140,0,.12);border-radius:14px;padding:16px 18px;margin-bottom:12px;}
+.setup-step-num{font-family:'Orbitron',monospace;font-size:10px;color:#FF8C00;letter-spacing:2px;margin-bottom:8px;}
+.setup-step p{font-size:13px;color:#aaa;line-height:1.7;}
+.setup-step code{background:rgba(255,140,0,.08);border:1px solid rgba(255,140,0,.2);border-radius:6px;padding:2px 8px;font-size:12px;color:#FF8C00;font-family:monospace;}
+.setup-step b{color:#f0f0f0;}
+.setup-link{color:#FF8C00;text-decoration:none;}
+.setup-link:hover{text-decoration:underline;}
+
+/* AUTH */
+.auth-wrap{width:100vw;height:100dvh;display:flex;align-items:center;justify-content:center;overflow-y:auto;padding:20px;}
+.auth-card{width:100%;max-width:420px;background:rgba(8,8,8,.97);border:1px solid rgba(255,140,0,.18);border-radius:22px;padding:38px 32px;position:relative;z-index:2;box-shadow:0 0 80px rgba(255,140,0,.1);animation:popIn .45s cubic-bezier(.34,1.56,.64,1);}
+@keyframes popIn{from{opacity:0;transform:scale(.9) translateY(20px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.auth-logo{font-family:'Orbitron',monospace;font-size:clamp(28px,8vw,40px);font-weight:900;color:#FF8C00;letter-spacing:8px;text-align:center;text-shadow:0 0 24px rgba(255,140,0,.8),0 0 48px rgba(255,140,0,.4);margin-bottom:6px;}
+.auth-sub{text-align:center;font-size:10px;color:#333;letter-spacing:4px;margin-bottom:28px;}
+.tab-row{display:flex;gap:5px;background:rgba(255,140,0,.05);border-radius:12px;padding:4px;margin-bottom:20px;}
+.tab-btn{flex:1;padding:9px;border-radius:9px;border:none;cursor:pointer;font-family:'Inter',sans-serif;font-size:12px;font-weight:600;letter-spacing:1px;transition:all .2s;background:transparent;color:#444;}
+.tab-btn.on{background:linear-gradient(135deg,#FF8C00,#FF4500);color:#000;}
+.a-inp{width:100%;background:rgba(255,140,0,.05);border:1px solid rgba(255,140,0,.15);border-radius:11px;color:#e0e0e0;outline:none;padding:13px 15px;font-size:14px;font-family:'Inter',sans-serif;margin-bottom:11px;transition:all .2s;}
+.a-inp:focus{border-color:rgba(255,140,0,.45);background:rgba(255,140,0,.08);}
+.a-inp::placeholder{color:#333;}
+.a-btn{width:100%;padding:14px;border:none;border-radius:12px;cursor:pointer;background:linear-gradient(135deg,#FF8C00,#FF4500);color:#000;font-family:'Orbitron',monospace;font-size:13px;font-weight:700;letter-spacing:3px;margin-top:6px;transition:all .2s;}
+.a-btn:hover{box-shadow:0 0 28px rgba(255,140,0,.5);}
+.a-btn:disabled{opacity:.4;cursor:not-allowed;}
+.a-err{color:#FF3B3B;font-size:12px;text-align:center;margin-bottom:8px;padding:8px;background:rgba(255,59,59,.08);border-radius:8px;}
+
+/* APP SHELL */
+.app-shell{width:100%;height:100%;display:flex;position:relative;z-index:1;}
+.nav-rail{width:66px;flex-shrink:0;background:rgba(4,4,4,.98);border-right:1px solid rgba(255,140,0,.09);display:flex;flex-direction:column;align-items:center;padding:14px 0;gap:3px;}
+.nav-logo-btn{width:44px;height:44px;border-radius:13px;background:linear-gradient(135deg,#FF8C00,#FF4500);display:flex;align-items:center;justify-content:center;font-size:22px;margin-bottom:18px;box-shadow:0 0 22px rgba(255,140,0,.55);animation:logoGlow 3s ease-in-out infinite;cursor:default;}
+@keyframes logoGlow{0%,100%{box-shadow:0 0 22px rgba(255,140,0,.55)}50%{box-shadow:0 0 40px rgba(255,140,0,.9)}}
+.nav-btn{width:46px;height:46px;border-radius:13px;border:none;cursor:pointer;background:transparent;font-size:21px;display:flex;align-items:center;justify-content:center;transition:all .2s;opacity:.4;filter:grayscale(.5);}
+.nav-btn:hover{background:rgba(255,140,0,.08);opacity:1;filter:none;}
+.nav-btn.on{background:rgba(255,140,0,.13);opacity:1;filter:none;border-left:3px solid #FF8C00;}
+.nav-spacer{flex:1;}
+.nav-ava{cursor:pointer;position:relative;}
+.online-dot{position:absolute;bottom:1px;right:1px;width:10px;height:10px;border-radius:50%;background:#FF8C00;border:2px solid #000;box-shadow:0 0 6px rgba(255,140,0,.9);animation:blink 2s ease-in-out infinite;}
+@keyframes blink{0%,100%{opacity:1}50%{opacity:.4}}
+.bottom-nav{display:none;height:72px;flex-shrink:0;background:rgba(4,4,4,.98);border-top:1px solid rgba(255,140,0,.1);align-items:center;justify-content:space-around;padding:0 2px;}
+.bnav-btn{flex:1;height:100%;border:none;background:transparent;cursor:pointer;font-size:26px;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:3px;border-radius:0;transition:all .2s;position:relative;-webkit-tap-highlight-color:transparent;min-width:60px;}
+.bnav-btn::before{content:'';position:absolute;inset:-8px;} /* Larger hitbox */
+.bnav-btn.on{background:rgba(255,140,0,.12);}
+.bnav-label{font-size:10px;color:#444;font-family:'Inter',sans-serif;letter-spacing:.5px;font-weight:600;}
+.bnav-btn.on .bnav-label{color:#FF8C00;}
+.content-area{flex:1;display:flex;overflow:hidden;}
+
+/* CONTACT PANEL */
+.contact-panel{width:300px;flex-shrink:0;background:rgba(5,5,5,.99);border-right:1px solid rgba(255,140,0,.08);display:flex;flex-direction:column;overflow:hidden;}
+.panel-hdr{padding:16px 13px 11px;border-bottom:1px solid rgba(255,140,0,.07);}
+.panel-title{font-family:'Orbitron',monospace;font-size:11px;font-weight:700;color:#FF8C00;letter-spacing:3px;margin-bottom:10px;}
+.srch{width:100%;background:rgba(255,140,0,.05);border:1px solid rgba(255,140,0,.12);border-radius:11px;color:#ddd;outline:none;padding:10px 13px;font-size:13px;transition:all .2s;}
+.srch:focus{border-color:rgba(255,140,0,.35);}
+.srch::placeholder{color:#2d2d2d;}
+.notes-card{margin:10px;border-radius:13px;background:linear-gradient(135deg,rgba(255,140,0,.09),rgba(255,140,0,.03));border:1px solid rgba(255,140,0,.2);padding:11px 13px;cursor:pointer;transition:all .2s;display:flex;align-items:center;gap:10px;}
+.notes-card:hover,.notes-card.active{background:rgba(255,140,0,.13);}
+.contacts-list{flex:1;overflow-y:auto;padding:3px 0 8px;}
+.c-row{display:flex;align-items:center;gap:11px;padding:10px 12px;cursor:pointer;transition:all .2s;position:relative;margin:1px 6px;border-radius:12px;border:1px solid transparent;}
+.c-row:hover{background:rgba(255,140,0,.06);}
+.c-row.active{background:rgba(255,140,0,.1);border-color:rgba(255,140,0,.2);}
+.c-name{font-weight:600;font-size:14px;color:#ddd;}
+.c-row.active .c-name{color:#FF8C00;}
+.c-prev{font-size:12px;color:#2d2d2d;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:150px;}
+.c-time{font-size:10px;color:#252525;position:absolute;top:10px;right:12px;}
+.add-btn{margin:6px 10px;padding:10px;border-radius:11px;border:1px dashed rgba(255,140,0,.22);background:transparent;color:#FF8C00;font-size:13px;cursor:pointer;transition:all .2s;display:flex;align-items:center;justify-content:center;gap:6px;width:calc(100% - 20px);}
+.add-btn:hover{background:rgba(255,140,0,.07);}
+
+/* CHAT */
+.chat-main{flex:1;display:flex;flex-direction:column;overflow:hidden;min-width:0;}
+.chat-hdr{padding:0 16px;height:66px;flex-shrink:0;display:flex;align-items:center;justify-content:space-between;background:rgba(0,0,0,.55);backdrop-filter:blur(18px);border-bottom:1px solid rgba(255,140,0,.08);}
+.chat-hdr-info{display:flex;align-items:center;gap:12px;}
+.chat-hdr-name{font-size:16px;font-weight:700;color:#f0f0f0;}
+.chat-hdr-sub{font-size:11px;margin-top:2px;}
+.s-on{color:#FF8C00;}.s-off{color:#3a3a3a;}
+.hdr-actions{display:flex;gap:7px;}
+.hdr-btn{width:40px;height:40px;border-radius:11px;border:1px solid rgba(255,140,0,.12);cursor:pointer;background:rgba(255,140,0,.06);font-size:17px;transition:all .2s;display:flex;align-items:center;justify-content:center;}
+.hdr-btn:hover{background:rgba(255,140,0,.15);}
+.back-btn{display:none;width:38px;height:38px;border-radius:11px;border:1px solid rgba(255,140,0,.15);background:rgba(255,140,0,.06);font-size:18px;cursor:pointer;align-items:center;justify-content:center;margin-right:5px;flex-shrink:0;}
+.msgs-area{flex:1;overflow-y:auto;padding:20px 16px;display:flex;flex-direction:column;gap:4px;}
+.date-div{display:flex;align-items:center;gap:12px;margin:12px 0 6px;}
+.date-div::before,.date-div::after{content:'';flex:1;height:1px;background:rgba(255,140,0,.07);}
+.date-div span{font-size:10px;color:#222;letter-spacing:2px;}
+
+/* BUBBLES */
+.msg-row{display:flex;gap:9px;align-items:flex-end;padding:2px 0;position:relative;}
+.msg-row.own{flex-direction:row-reverse;}
+.bwrap{max-width:72%;position:relative;}
+.msg-actions-bar{display:flex;gap:3px;margin-bottom:5px;opacity:0;pointer-events:none;transition:opacity .18s;}
+.msg-row.own .msg-actions-bar{justify-content:flex-end;}
+.msg-row.other .msg-actions-bar{justify-content:flex-start;}
+.bwrap.open .msg-actions-bar{opacity:1;pointer-events:all;}
+@media(hover:hover){.bwrap:hover .msg-actions-bar{opacity:1;pointer-events:all;}}
+.mab-btn{background:rgba(10,10,10,.92);border:1px solid rgba(255,140,0,.18);border-radius:9px;cursor:pointer;padding:5px 9px;font-size:14px;color:#888;transition:all .15s;display:flex;align-items:center;gap:4px;}
+.mab-btn:hover,.mab-btn:active{background:rgba(255,140,0,.15);color:#FF8C00;}
+.mab-btn.danger{color:#FF3B3B;}
+.bubble{padding:11px 16px;animation:bubIn .25s cubic-bezier(.34,1.56,.64,1);cursor:pointer;-webkit-tap-highlight-color:transparent;}
+@keyframes bubIn{from{opacity:0;transform:scale(.84) translateY(11px)}to{opacity:1;transform:scale(1) translateY(0)}}
+.msg-row.own  .bubble{background:linear-gradient(135deg,rgba(255,140,0,.2),rgba(255,80,0,.1));border:1px solid rgba(255,140,0,.25);border-radius:18px 5px 18px 18px;}
+.msg-row.other .bubble{background:rgba(14,14,14,.99);border:1px solid rgba(255,255,255,.05);border-radius:5px 18px 18px 18px;}
+.bwrap.open .bubble{border-color:rgba(255,140,0,.45)!important;}
+.b-text{font-size:15px;line-height:1.62;color:#e5e5e5;word-break:break-word;}
+.b-meta{font-size:10px;color:#2d2d2d;margin-top:7px;display:flex;align-items:center;gap:4px;}
+.msg-row.own .b-meta{justify-content:flex-end;}
+.reactions{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px;}
+.rpill{background:rgba(255,140,0,.09);border:1px solid rgba(255,140,0,.18);border-radius:18px;padding:3px 9px;font-size:13px;cursor:pointer;display:flex;gap:4px;align-items:center;}
+.rpill:active{background:rgba(255,140,0,.2);}
+.rpill.mine{background:rgba(255,140,0,.19);box-shadow:0 0 8px rgba(255,140,0,.28);}
+.rct{font-size:10px;color:#FF8C00;font-weight:600;}
+.reply-strip{background:rgba(255,140,0,.07);border-left:3px solid #FF8C00;padding:7px 11px;margin-bottom:5px;border-radius:0 7px 7px 0;font-size:11px;color:#666;}
+.typing-row{display:flex;gap:9px;align-items:flex-end;padding:4px 0;}
+.typing-bub{background:rgba(14,14,14,.99);border:1px solid rgba(255,255,255,.05);border-radius:5px 18px 18px 18px;padding:14px 18px;display:flex;gap:5px;align-items:center;}
+.dot{width:7px;height:7px;border-radius:50%;background:#FF8C00;animation:typB 1.2s ease-in-out infinite;}
+.dot:nth-child(2){animation-delay:.2s;}.dot:nth-child(3){animation-delay:.4s;}
+@keyframes typB{0%,100%{transform:translateY(0);opacity:.3}50%{transform:translateY(-7px);opacity:1}}
+
+/* INPUT */
+.input-bar{padding:10px 14px 14px;background:rgba(0,0,0,.6);backdrop-filter:blur(18px);border-top:1px solid rgba(255,140,0,.07);flex-shrink:0;}
+.reply-banner{display:flex;align-items:center;justify-content:space-between;background:rgba(255,140,0,.06);border-radius:9px;padding:8px 12px;margin-bottom:9px;border-left:3px solid #FF8C00;font-size:12px;color:#777;}
+.inp-row{display:flex;gap:7px;align-items:center;}
+.msg-inp{flex:1;background:rgba(255,140,0,.05);border:1px solid rgba(255,140,0,.14);border-radius:14px;color:#e0e0e0;outline:none;padding:13px 16px;font-size:15px;font-family:'Inter',sans-serif;transition:all .2s;min-width:0;}
+.msg-inp:focus{border-color:rgba(255,140,0,.38);background:rgba(255,140,0,.07);}
+.msg-inp::placeholder{color:#222;}
+.ico-btn{width:48px;height:48px;border-radius:13px;border:1px solid rgba(255,140,0,.12);cursor:pointer;background:rgba(255,140,0,.06);color:#FF8C00;font-size:19px;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .2s;}
+.ico-btn:active{background:rgba(255,140,0,.16);}
+.send-btn{width:48px;height:48px;border-radius:13px;border:none;cursor:pointer;background:linear-gradient(135deg,#FF8C00,#FF4500);color:#000;font-size:19px;font-weight:700;flex-shrink:0;display:flex;align-items:center;justify-content:center;transition:all .2s;}
+.send-btn:active{box-shadow:0 0 24px rgba(255,140,0,.6);transform:scale(1.07);}
+.send-btn:disabled{opacity:.2;cursor:not-allowed;transform:none;}
+
+/* EMPTY */
+.empty-chat{flex:1;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:16px;}
+.empty-icon{font-size:72px;filter:drop-shadow(0 0 24px rgba(255,140,0,.5));animation:float 4s ease-in-out infinite;}
+@keyframes float{0%,100%{transform:translateY(0)}50%{transform:translateY(-12px)}}
+.empty-title{font-family:'Orbitron',monospace;font-size:18px;font-weight:800;color:#FF8C00;letter-spacing:3px;}
+.empty-sub{font-size:13px;color:#2d2d2d;text-align:center;padding:0 24px;}
+
+/* EMOJI SHEET */
+.epick-sheet{position:fixed;bottom:0;left:0;right:0;z-index:200;background:rgba(8,8,8,.98);border-top:1px solid rgba(255,140,0,.2);border-radius:20px 20px 0 0;padding:16px 20px 32px;box-shadow:0 -8px 40px rgba(0,0,0,.7);animation:sheetUp .22s cubic-bezier(.34,1.26,.64,1);}
+@keyframes sheetUp{from{transform:translateY(100%)}to{transform:translateY(0)}}
+.epick-title{font-size:11px;color:#444;letter-spacing:2px;font-family:'Orbitron',monospace;margin-bottom:14px;text-align:center;}
+.epick-row{display:flex;justify-content:space-around;}
+.ep-btn{background:rgba(255,140,0,.07);border:1px solid rgba(255,140,0,.12);border-radius:14px;cursor:pointer;font-size:26px;padding:12px 14px;flex:1;margin:0 3px;text-align:center;}
+.ep-btn:active{transform:scale(1.2);background:rgba(255,140,0,.2);}
+.sheet-overlay{position:fixed;inset:0;z-index:199;background:rgba(0,0,0,.5);}
+
+/* AVA */
+.ava{border-radius:50%;background:rgba(255,140,0,.1);border:2px solid rgba(255,140,0,.22);display:flex;align-items:center;justify-content:center;flex-shrink:0;position:relative;}
+.ava-story-wrap{border-radius:50%;padding:2.5px;display:flex;align-items:center;justify-content:center;flex-shrink:0;background:conic-gradient(#FF8C00,#FF6600,#FFB347,#FF8C00);animation:storyRot 4s linear infinite;}
+@keyframes storyRot{to{filter:hue-rotate(360deg)}}
+.ava-story-inner{background:#000;border-radius:50%;padding:2px;}
+
+/* FEED */
+.page-scroll{flex:1;overflow-y:auto;padding:16px;}
+.page-title{font-family:'Orbitron',monospace;font-size:12px;font-weight:800;color:#FF8C00;letter-spacing:4px;margin-bottom:14px;}
+.compose-card{background:rgba(8,8,8,.95);border:1px solid rgba(255,140,0,.12);border-radius:16px;padding:16px;margin-bottom:14px;}
+.compose-ta{width:100%;background:rgba(255,140,0,.04);border:1px solid rgba(255,140,0,.1);border-radius:12px;color:#ddd;outline:none;padding:12px 15px;font-size:14px;font-family:'Inter',sans-serif;resize:none;min-height:76px;transition:all .2s;}
+.compose-ta::placeholder{color:#222;}
+.post-card{background:rgba(8,8,8,.95);border:1px solid rgba(255,140,0,.1);border-radius:16px;padding:18px;margin-bottom:12px;animation:cardIn .3s ease;}
+@keyframes cardIn{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:translateY(0)}}
+.post-text{font-size:14px;line-height:1.7;color:#aaa;margin:11px 0;}
+.post-acts{display:flex;flex-wrap:wrap;gap:4px;padding-top:11px;border-top:1px solid rgba(255,255,255,.04);}
+.pa-btn{background:none;border:none;cursor:pointer;font-size:12px;display:flex;align-items:center;gap:5px;padding:6px 10px;border-radius:9px;transition:all .2s;color:#2d2d2d;}
+.pa-btn:active{background:rgba(255,140,0,.08);color:#FF8C00;}
+.pa-btn.active{color:#FF8C00;}
+
+/* CHANNELS / CALLS */
+.ch-card{background:rgba(8,8,8,.95);border:1px solid rgba(255,140,0,.1);border-radius:16px;padding:18px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:12px;}
+.ch-icon{width:50px;height:50px;border-radius:13px;background:rgba(255,140,0,.08);border:1px solid rgba(255,140,0,.15);display:flex;align-items:center;justify-content:center;font-size:24px;flex-shrink:0;}
+.call-card{background:rgba(8,8,8,.95);border:1px solid rgba(255,140,0,.1);border-radius:14px;padding:15px 18px;display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;}
+.sect-lbl{font-family:'Orbitron',monospace;font-size:9px;color:#222;letter-spacing:3px;margin:12px 0 8px;}
+
+/* SETTINGS */
+.stg-section{background:rgba(8,8,8,.95);border:1px solid rgba(255,140,0,.1);border-radius:16px;padding:20px;margin-bottom:13px;}
+.stg-lbl{font-family:'Orbitron',monospace;font-size:9px;font-weight:700;color:#FF8C00;letter-spacing:3px;margin-bottom:15px;}
+.stg-inp{width:100%;background:rgba(255,140,0,.05);border:1px solid rgba(255,140,0,.15);border-radius:11px;color:#ddd;outline:none;padding:11px 14px;font-size:14px;font-family:'Inter',sans-serif;transition:all .2s;}
+.stg-inp:focus{border-color:rgba(255,140,0,.4);}
+.tgl-row{display:flex;align-items:center;justify-content:space-between;padding:13px 0;}
+.tgl-row+.tgl-row{border-top:1px solid rgba(255,255,255,.04);}
+.tgl{width:46px;height:26px;border-radius:13px;cursor:pointer;position:relative;transition:all .3s;background:rgba(255,255,255,.08);border:1px solid rgba(255,255,255,.08);flex-shrink:0;}
+.tgl.on{background:#FF8C00;box-shadow:0 0 12px rgba(255,140,0,.45);border-color:#FF8C00;}
+.tgl-thumb{position:absolute;top:3px;left:3px;width:18px;height:18px;border-radius:50%;background:#fff;transition:left .3s;}
+.tgl.on .tgl-thumb{left:23px;}
+.ava-grid{display:flex;flex-wrap:wrap;gap:8px;margin-top:11px;}
+.ava-sel{width:44px;height:44px;border-radius:50%;border:2px solid rgba(255,140,0,.12);background:transparent;cursor:pointer;font-size:21px;transition:all .2s;}
+.ava-sel:active{transform:scale(1.14);}
+.ava-sel.on{border-color:#FF8C00;box-shadow:0 0 12px rgba(255,140,0,.45);}
+.glow-prev{margin-top:12px;padding:12px;border-radius:11px;text-align:center;background:rgba(255,140,0,.04);font-family:'Orbitron',monospace;font-size:12px;letter-spacing:2px;color:#FF8C00;transition:box-shadow .2s;}
+
+/* CALL OVERLAY */
+.call-ov{position:fixed;inset:0;z-index:9999;background:rgba(0,0,0,.97);display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.call-bg-glow{position:absolute;inset:0;background:radial-gradient(ellipse at center,rgba(255,140,0,.08) 0%,transparent 65%);animation:cPulse 3s ease-in-out infinite;}
+@keyframes cPulse{0%,100%{opacity:.4}50%{opacity:1}}
+.call-ring{width:140px;height:140px;border-radius:50%;border:2px solid rgba(255,140,0,.3);display:flex;align-items:center;justify-content:center;animation:rPulse 2s ease-in-out infinite;margin-bottom:28px;}
+@keyframes rPulse{0%,100%{box-shadow:0 0 0 0 rgba(255,140,0,.3)}50%{box-shadow:0 0 0 22px rgba(255,140,0,0)}}
+.call-name{font-family:'Orbitron',monospace;font-size:clamp(22px,5vw,30px);font-weight:900;color:#FF8C00;letter-spacing:3px;text-shadow:0 0 28px rgba(255,140,0,.7);}
+.call-timer{font-family:'Orbitron',monospace;font-size:17px;color:#3a3a3a;margin:7px 0 34px;}
+.wave-viz{display:flex;align-items:center;gap:4px;height:46px;}
+.wbar{width:4px;border-radius:3px;background:#FF8C00;box-shadow:0 0 5px rgba(255,140,0,.5);}
+.call-ctrls{display:flex;gap:22px;margin-top:40px;}
+.cbtn{width:68px;height:68px;border-radius:50%;border:none;cursor:pointer;font-size:26px;display:flex;align-items:center;justify-content:center;transition:all .2s;-webkit-tap-highlight-color:transparent;}
+.cbtn.end{background:#FF3B3B;box-shadow:0 0 28px rgba(255,59,59,.5);}
+.cbtn.ctrl{background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.1);}
+.cbtn.ctrl.on{background:rgba(255,140,0,.2);border-color:rgba(255,140,0,.4);}
+.ctrl-label{font-size:11px;color:#2d2d2d;margin-top:7px;text-align:center;}
+
+/* MODAL */
+.modal-bd{position:fixed;inset:0;background:rgba(0,0,0,.88);backdrop-filter:blur(12px);display:flex;align-items:center;justify-content:center;z-index:5000;padding:20px;}
+.modal-card{width:100%;max-width:400px;background:rgba(7,7,7,.99);border:1px solid rgba(255,140,0,.2);border-radius:20px;padding:28px;box-shadow:0 0 55px rgba(255,140,0,.12);animation:popIn .3s cubic-bezier(.34,1.56,.64,1);}
+.modal-title{font-family:'Orbitron',monospace;font-size:12px;font-weight:700;color:#FF8C00;letter-spacing:3px;margin-bottom:17px;}
+.found-row{background:rgba(255,140,0,.06);border:1px solid rgba(255,140,0,.18);border-radius:13px;padding:13px;display:flex;align-items:center;justify-content:space-between;margin:12px 0;}
+
+/* BUTTONS */
+.btn-p{background:linear-gradient(135deg,#FF8C00,#FF4500);border:none;border-radius:11px;color:#000;font-weight:700;cursor:pointer;padding:10px 18px;font-size:13px;font-family:'Inter',sans-serif;transition:all .2s;white-space:nowrap;-webkit-tap-highlight-color:transparent;}
+.btn-p:disabled{opacity:.28;cursor:not-allowed;}
+.btn-g{background:transparent;border:1px solid rgba(255,140,0,.25);border-radius:11px;color:#FF8C00;font-weight:600;cursor:pointer;padding:10px 18px;font-size:13px;font-family:'Inter',sans-serif;transition:all .2s;white-space:nowrap;}
+.btn-d{background:transparent;border:1px solid rgba(255,59,59,.3);border-radius:11px;color:#FF3B3B;font-weight:600;cursor:pointer;padding:10px 18px;font-size:13px;font-family:'Inter',sans-serif;}
+
+/* TOAST */
+.toast{position:fixed;bottom:80px;left:50%;transform:translateX(-50%);background:rgba(255,140,0,.15);border:1px solid rgba(255,140,0,.3);color:#FF8C00;padding:10px 20px;border-radius:12px;font-size:13px;font-family:'Orbitron',monospace;letter-spacing:1px;z-index:9998;pointer-events:none;animation:popIn .3s ease;}
+
+/* LOADING */
+.loading-screen{width:100vw;height:100dvh;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:18px;background:#000;}
+.loading-logo{font-family:'Orbitron',monospace;font-size:40px;font-weight:900;color:#FF8C00;letter-spacing:8px;text-shadow:0 0 24px rgba(255,140,0,.8);animation:logoGlow 1.5s ease-in-out infinite;}
+.loading-bar-wrap{width:200px;height:3px;background:rgba(255,140,0,.1);border-radius:3px;overflow:hidden;}
+.loading-bar{height:100%;background:#FF8C00;border-radius:3px;animation:loadBar 1.2s ease-in-out infinite;}
+@keyframes loadBar{0%{width:0;margin-left:0}50%{width:60%;margin-left:20%}100%{width:0;margin-left:100%}}
+
+@media(max-width:700px){
+  .nav-rail{display:none!important;}
+  .bottom-nav{display:flex!important;}
+  .content-area{position:relative;overflow:hidden;}
+  .contact-panel{width:100%;border-right:none;position:absolute;inset:0;z-index:2;transition:transform .28s cubic-bezier(.4,0,.2,1);}
+  .contact-panel.slide-out{transform:translateX(-100%);}
+  .chat-main{position:absolute;inset:0;z-index:3;transform:translateX(100%);transition:transform .28s cubic-bezier(.4,0,.2,1);}
+  .chat-main.slide-in{transform:translateX(0);}
+  .back-btn{display:flex!important;}
+  .bwrap{max-width:84%;}
+  .msgs-area{padding:14px 12px;}
+  .input-bar{padding:9px 11px 13px;}
+}
+@media(min-width:1100px){
+  .contact-panel{width:310px;}
+  .msgs-area{padding:24px 32px;}
+  .input-bar{padding:12px 32px 18px;}
+}
+`;
+
+// ── SMALL COMPONENTS ────────────────────────────────────────
+function Ava({user,size=40,story=false,showStatus=false}){
+  const avatar = user?.avatar || "👤";
+  const isPhoto = avatar.startsWith("data:image");
+  
+  const inner = (
+    <div className="ava" style={{
+      width:size,
+      height:size,
+      fontSize:size*.46,
+      backgroundImage: isPhoto ? `url(${avatar})` : "none",
+      backgroundSize: "cover",
+      backgroundPosition: "center",
+      overflow: "hidden"
+    }}>
+      {!isPhoto && avatar}
+      {showStatus && !user?.ghostMode && <div className="online-dot"/>}
+    </div>
+  );
+  
+  if(!story)return inner;
+  return <div className="ava-story-wrap" style={{width:size+8,height:size+8}}><div className="ava-story-inner">{inner}</div></div>;
+}
+
+function EmojiSheet({onPick,onClose}){
+  return(<><div className="sheet-overlay" onClick={onClose}/><div className="epick-sheet"><div className="epick-title">REACT</div><div className="epick-row">{EMOJIS.map(e=><button key={e} className="ep-btn" onClick={()=>{onPick(e);onClose();}}>{e}</button>)}</div></div></>);
+}
+
+function Toast({msg}){return msg?<div className="toast">{msg}</div>:null;}
+
+// ── SETUP SCREEN (shown when Firebase not configured) ───────
+function SetupScreen(){
+  return(
+    <div className="setup-wrap">
+      <div className="bg-grid"/><div className="orb orb1"/><div className="orb orb2"/>
+      <div className="setup-card">
+        <div className="setup-logo">ECHO</div>
+        <div style={{textAlign:"center",fontSize:11,color:"#444",letterSpacing:3,marginBottom:28}}>FIREBASE SETUP REQUIRED</div>
+
+        <div className="setup-step">
+          <div className="setup-step-num">STEP 1 — CREATE FIREBASE PROJECT</div>
+          <p>Go to <a className="setup-link" href="https://console.firebase.google.com" target="_blank">console.firebase.google.com</a> → <b>Add Project</b> → give it a name → continue</p>
+        </div>
+
+        <div className="setup-step">
+          <div className="setup-step-num">STEP 2 — ADD WEB APP</div>
+          <p>Click the <b>&lt;/&gt;</b> Web icon → register app → copy the <code>firebaseConfig</code> object</p>
+        </div>
+
+        <div className="setup-step">
+          <div className="setup-step-num">STEP 3 — ENABLE AUTH</div>
+          <p>Sidebar → <b>Authentication</b> → Get started → <b>Email/Password</b> → Enable → Save</p>
+        </div>
+
+        <div className="setup-step">
+          <div className="setup-step-num">STEP 4 — ENABLE FIRESTORE</div>
+          <p>Sidebar → <b>Firestore Database</b> → Create database → Start in <b>test mode</b> → Done</p>
+        </div>
+
+        <div className="setup-step">
+          <div className="setup-step-num">STEP 5 — PASTE YOUR CONFIG</div>
+          <p>Open this HTML file in a text editor. Find <code>const firebaseConfig</code> near the top and replace all 6 <code>PASTE_YOUR_...</code> values with your real Firebase config. Save and open in browser!</p>
+        </div>
+
+        <div style={{marginTop:20,padding:"14px 16px",background:"rgba(255,140,0,.06)",borderRadius:12,fontSize:12,color:"#888",lineHeight:1.8}}>
+          💡 <b style={{color:"#FF8C00"}}>It's free!</b> Firebase's Spark plan gives you 10,000 auth users and 1GB Firestore for free — more than enough for ECHO.
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── AUTH ────────────────────────────────────────────────────
+function Auth({onLogin}){
+  const [mode, setMode]=useState("login");
+  const [nick, setNick]=useState("");
+  const [email,setEmail]=useState("");
+  const [pass, setPass] =useState("");
+  const [err,  setErr]  =useState("");
+  const [busy, setBusy] =useState(false);
+  const [rememberDevice, setRememberDevice]=useState(true);
+  const fb = window._fb;
+
+  // Check if device is already trusted on mount
+  useEffect(()=>{
+    const trusted = localStorage.getItem("echo_trusted_device");
+    if(trusted){
+      const data = JSON.parse(trusted);
+      const expiry = data.expiry || 0;
+      if(Date.now() < expiry){
+        // Device still trusted, auto-fill email
+        setEmail(data.email || "");
+      } else {
+        // Trust expired, clear it
+        localStorage.removeItem("echo_trusted_device");
+      }
+    }
+  },[]);
+
+  const submit=async()=>{
+    setErr(""); setBusy(true);
+    try{
+      if(mode==="login"){
+        const cred = await fb.signIn(email.trim(), pass);
+        const snap = await fb.getUser(cred.user.uid);
+        
+        // Save trusted device if checkbox is checked
+        if(rememberDevice){
+          const expiry = Date.now() + (30 * 24 * 60 * 60 * 1000); // 30 days
+          localStorage.setItem("echo_trusted_device", JSON.stringify({
+            email: email.trim(),
+            expiry: expiry,
+            savedAt: Date.now()
+          }));
+        }
+        
+        if(snap.exists()){
+          onLogin({uid:cred.user.uid,...snap.data()});
+        } else {
+          // Profile missing — create default
+          const profile={nickname:email.split("@")[0],code:gcode(),avatar:"🌟",ghostMode:false,selfDestruct:null,glowIntensity:20,contacts:[],email:email.trim()};
+          await fb.setUser(cred.user.uid, profile);
+          onLogin({uid:cred.user.uid,...profile});
+        }
+      } else {
+        if(!nick.trim()){setErr("Nickname required.");setBusy(false);return;}
+        const cred = await fb.signUp(email.trim(), pass);
+        const profile={nickname:nick.trim(),code:gcode(),avatar:"🌟",ghostMode:false,selfDestruct:null,glowIntensity:20,contacts:[],email:email.trim()};
+        await fb.setUser(cred.user.uid, profile);
+        
+        // Auto-trust device on signup
+        if(rememberDevice){
+          const expiry = Date.now() + (30 * 24 * 60 * 60 * 1000);
+          localStorage.setItem("echo_trusted_device", JSON.stringify({
+            email: email.trim(),
+            expiry: expiry,
+            savedAt: Date.now()
+          }));
+        }
+        
+        onLogin({uid:cred.user.uid,...profile});
+      }
+    }catch(e){
+      const msgs={
+        "auth/email-already-in-use":"Email already registered — sign in instead.",
+        "auth/wrong-password":"Wrong password.",
+        "auth/user-not-found":"No account with that email.",
+        "auth/invalid-email":"Invalid email address.",
+        "auth/weak-password":"Password must be 6+ characters.",
+        "auth/too-many-requests":"Too many attempts. Try again later.",
+        "auth/invalid-credential":"Wrong email or password.",
+      };
+      setErr(msgs[e.code]||e.message);
+    }
+    setBusy(false);
+  };
+
+  return(
+    <div className="auth-wrap">
+      <div className="bg-grid"/><div className="orb orb1"/><div className="orb orb2"/>
+      <div className="auth-card">
+        <div className="auth-logo">ECHO</div>
+        <div className="auth-sub">SECURE · ENCRYPTED · REAL ACCOUNTS</div>
+        <div className="tab-row">
+          {["login","signup"].map(m=><button key={m} className={`tab-btn${mode===m?" on":""}`} onClick={()=>setMode(m)}>{m==="login"?"SIGN IN":"SIGN UP"}</button>)}
+        </div>
+        {mode==="signup"&&<input className="a-inp" placeholder="Nickname (display name)" value={nick} onChange={e=>setNick(e.target.value)}/>}
+        <input className="a-inp" type="email" placeholder="Email address" value={email} onChange={e=>setEmail(e.target.value)}/>
+        <input className="a-inp" type="password" placeholder="Password (6+ characters)" value={pass} onChange={e=>setPass(e.target.value)} onKeyDown={e=>e.key==="Enter"&&submit()}/>
+        {err&&<div className="a-err">⚠️ {err}</div>}
+        
+        {/* Remember Device Checkbox */}
+        <div style={{display:"flex",alignItems:"center",gap:10,padding:"12px 0",marginTop:6}}>
+          <input 
+            type="checkbox" 
+            id="remember-device" 
+            checked={rememberDevice} 
+            onChange={e=>setRememberDevice(e.target.checked)}
+            style={{width:18,height:18,cursor:"pointer",accentColor:"#FF8C00"}}
+          />
+          <label htmlFor="remember-device" style={{fontSize:13,color:"#999",cursor:"pointer",userSelect:"none"}}>
+            🔒 Trust this device for 30 days
+          </label>
+        </div>
+        
+        <button className="a-btn" onClick={submit} disabled={busy}>
+          {busy?"CONNECTING...":mode==="login"?"ENTER ECHO":"CREATE ACCOUNT"}
+        </button>
+        <div style={{marginTop:16,fontSize:11,color:"#2d2d2d",textAlign:"center",lineHeight:1.8}}>
+          Your account is saved permanently with Firebase Auth.<br/>
+          Log in from any device, any time. 🔐
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── NAV ─────────────────────────────────────────────────────
+const NAV=[{id:"chats",icon:"💬",label:"Chats"},{id:"feed",icon:"📡",label:"Feed"},{id:"channels",icon:"📻",label:"Channels"},{id:"calls",icon:"📞",label:"Calls"},{id:"settings",icon:"⚙️",label:"Settings"}];
+function NavRail({tab,setTab,user}){
+  return(<div className="nav-rail"><div className="nav-logo-btn">⚡</div>{NAV.map(it=><button key={it.id} className={`nav-btn${tab===it.id?" on":""}`} onClick={()=>setTab(it.id)}>{it.icon}</button>)}<div className="nav-spacer"/><div className="nav-ava" onClick={()=>setTab("settings")}><Ava user={user} size={42} showStatus/></div></div>);
+}
+function BottomNav({tab,setTab}){
+  return(<div className="bottom-nav">{NAV.map(it=><button key={it.id} className={`bnav-btn${tab===it.id?" on":""}`} onClick={()=>setTab(it.id)}>{it.icon}<span className="bnav-label">{it.label}</span></button>)}</div>);
+}
+
+// ── CONTACT PANEL ────────────────────────────────────────────
+function ContactPanel({me,contacts,allUsers,messages,selected,setSelected,onAdd,mobile,chatOpen}){
+  const [q,setQ]=useState("");
+  const filtered=contacts.filter(uid=>{const u=allUsers[uid];return u&&(u.nickname?.toLowerCase().includes(q.toLowerCase())||u.code?.includes(q));});
+  const lastMsg=uid=>{const ms=(messages[ckey(me.uid,uid)]||[]);return ms[ms.length-1]||null;};
+  return(
+    <div className={`contact-panel${mobile&&chatOpen?" slide-out":""}`}>
+      <div className="panel-hdr">
+        <div className="panel-title">MESSAGES</div>
+        <input className="srch" placeholder="🔍  Search..." value={q} onChange={e=>setQ(e.target.value)}/>
+      </div>
+      <div className={`notes-card${selected==="notes"?" active":""}`} onClick={()=>setSelected("notes")}>
+        <div style={{width:36,height:36,borderRadius:"50%",background:"linear-gradient(135deg,#FF8C00,#FF4500)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:17,flexShrink:0}}>📓</div>
+        <div><div style={{fontWeight:700,fontSize:13,color:"#FF8C00"}}>My Notes</div><div style={{fontSize:11,color:"#2d2d2d"}}>Private encrypted space</div></div>
+      </div>
+      <div className="contacts-list">
+        {filtered.length===0&&contacts.length===0&&<div style={{padding:"18px 14px",fontSize:12,color:"#2d2d2d",textAlign:"center",lineHeight:1.9}}>No contacts yet.<br/>Add friends using their code!</div>}
+        {filtered.map(uid=>{
+          const u=allUsers[uid];if(!u)return null;
+          const k=ckey(me.uid,uid);const last=lastMsg(uid);
+          return(<div key={uid} className={`c-row${selected===k?" active":""}`} onClick={()=>setSelected(k)}>
+            <Ava user={u} size={44} showStatus/>
+            <div style={{flex:1,minWidth:0}}><div className="c-name">{u.nickname}</div><div className="c-prev">{last?`🔐 ${dec(last.text).slice(0,24)}${dec(last.text).length>24?"...":""}` :"No messages yet"}</div></div>
+            {last&&<div className="c-time">{ago(tsMs(last.ts))}</div>}
+          </div>);
+        })}
+        <button className="add-btn" onClick={onAdd}>＋ Add Friend by Code</button>
+      </div>
+    </div>
+  );
+}
+
+// ── MESSAGE BUBBLE ───────────────────────────────────────────
+function MsgBubble({msg,isOwn,allUsers,me,onReact,onEdit,onDelete,onReply}){
+  const [open,setOpen]=useState(false);
+  const [editing,setEditing]=useState(false);
+  const [editVal,setEditVal]=useState("");
+  const [showEmoji,setShowEmoji]=useState(false);
+  const text=dec(msg.text);
+  const sender=allUsers[msg.from];
+  const startEdit=()=>{setEditVal(text);setEditing(true);setOpen(false);};
+  const saveEdit=()=>{if(editVal.trim()){onEdit(msg.id,editVal.trim());setEditing(false);}};
+  return(<>
+    {showEmoji&&<EmojiSheet onPick={e=>onReact(msg.id,e)} onClose={()=>setShowEmoji(false)}/>}
+    <div className={`msg-row${isOwn?" own":" other"}`}>
+      {!isOwn&&<Ava user={sender} size={34}/>}
+      <div className={`bwrap${open?" open":""}`}>
+        <div className="msg-actions-bar">
+          <button className="mab-btn" onPointerDown={e=>{e.stopPropagation();setShowEmoji(true);setOpen(false);}}>😊</button>
+          <button className="mab-btn" onPointerDown={e=>{e.stopPropagation();onReply(text);setOpen(false);}}>↩ Reply</button>
+          {isOwn&&<><button className="mab-btn" onPointerDown={e=>{e.stopPropagation();startEdit();}}>✏️</button><button className="mab-btn danger" onPointerDown={e=>{e.stopPropagation();onDelete(msg.id);setOpen(false);}}>🗑</button></>}
+        </div>
+        {msg.replyTo&&<div className="reply-strip">↩ {msg.replyTo.slice(0,50)}...</div>}
+        <div className="bubble" onClick={()=>setOpen(p=>!p)}>
+          {editing?(<div style={{display:"flex",gap:7}}>
+            <input style={{flex:1,background:"rgba(255,140,0,.08)",border:"1px solid rgba(255,140,0,.3)",borderRadius:8,color:"#e0e0e0",outline:"none",padding:"8px 10px",fontSize:14,fontFamily:"'Inter',sans-serif"}} value={editVal} onChange={e=>setEditVal(e.target.value)} onKeyDown={e=>{if(e.key==="Enter")saveEdit();if(e.key==="Escape")setEditing(false);}} autoFocus/>
+            <button onClick={e=>{e.stopPropagation();saveEdit();}} className="btn-p" style={{padding:"8px 11px",fontSize:13}}>✓</button>
+          </div>):(
+            <div className="b-text">{msg.selfDestruct&&<span style={{fontSize:10,color:"#FF8C00",display:"block",marginBottom:4}}>💣 Self-destructs</span>}{text}{msg.edited&&<span style={{fontSize:10,color:"#333",marginLeft:6}}>(edited)</span>}</div>
+          )}
+          {Object.keys(msg.reactions||{}).length>0&&(<div className="reactions">{Object.entries(msg.reactions).map(([e,us])=>Array.isArray(us)&&us.length>0&&(<div key={e} className={`rpill${us.includes(me.uid)?" mine":""}`} onClick={ev=>{ev.stopPropagation();onReact(msg.id,e);}}>{e}<span className="rct">{us.length}</span></div>))}</div>)}
+          <div className="b-meta">{isOwn&&<span style={{color:"rgba(255,140,0,.35)"}}>🔐</span>}<span>{ago(tsMs(msg.ts))}</span></div>
+        </div>
+      </div>
+    </div>
+  </>);
+}
+
+// ── CHAT VIEW ────────────────────────────────────────────────
+function ChatView({chatKey:key,me,allUsers,onCall,onBack,mobile,showToast}){
+  const [input,setInput]=useState("");
+  const [replyTo,setReplyTo]=useState(null);
+  const [typing,setTyping]=useState(false);
+  const [messages,setMessages]=useState([]);
+  const endRef=useRef(null);
+  const typRef=useRef(null);
+  const fb=window._fb;
+
+  const otherUid=(!key||key==="notes")?null:key.split("-").find(u=>u!==me.uid);
+  const otherUser=otherUid?allUsers[otherUid]:null;
+
+  // Subscribe to Firestore messages for this chat
+  useEffect(()=>{
+    if(!key||!fb)return;
+    setMessages([]);
+    if(key==="notes"){
+      // Notes stored locally in Firestore under user's own sub-collection
+      const unsub=fb.listenMessages(`notes-${me.uid}`, setMessages);
+      return unsub;
+    }
+    const unsub=fb.listenMessages(key, setMessages);
+    return unsub;
+  },[key]);
+
+  useEffect(()=>{endRef.current?.scrollIntoView({behavior:"smooth"});},[messages.length, key]);
+
+  if(!key)return(<div className="empty-chat"><div className="empty-icon">⚡</div><div className="empty-title">SELECT A CHAT</div><div className="empty-sub">Tap a conversation to start messaging</div></div>);
+
+  const send=async()=>{
+    if(!input.trim())return;
+    const chatKey2=key==="notes"?`notes-${me.uid}`:key;
+    const m={from:me.uid,text:enc(input.trim()),ts:new Date(),reactions:{},replyTo,edited:false,selfDestruct:me.selfDestruct||null};
+    await fb.sendMessage(chatKey2,m);
+    setInput("");setReplyTo(null);
+    // Bot reply for non-notes chats
+    if(key!=="notes"&&otherUid){
+      setTyping(true);
+      clearTimeout(typRef.current);
+      typRef.current=setTimeout(async()=>{
+        setTyping(false);
+        const r={from:otherUid,text:enc(BOT[Math.floor(Math.random()*BOT.length)]),ts:new Date(),reactions:{},edited:false};
+        await fb.sendMessage(key,r);
+      },1400+Math.random()*1600);
+    }
+  };
+
+  const onReact=async(msgId,emoji)=>{
+    const msg=messages.find(m=>m.id===msgId);if(!msg)return;
+    const arr=msg.reactions[emoji]||[];
+    const newArr=arr.includes(me.uid)?arr.filter(u=>u!==me.uid):[...arr,me.uid];
+    const ck=key==="notes"?`notes-${me.uid}`:key;
+    await fb.updateMessage(ck,msgId,{reactions:{...msg.reactions,[emoji]:newArr}});
+  };
+  const onEdit=async(msgId,txt)=>{
+    const ck=key==="notes"?`notes-${me.uid}`:key;
+    await fb.updateMessage(ck,msgId,{text:enc(txt),edited:true});
+    showToast("Message edited");
+  };
+  const onDelete=async(msgId)=>{
+    const ck=key==="notes"?`notes-${me.uid}`:key;
+    await fb.deleteMessage(ck,msgId);
+    showToast("Message deleted");
+  };
+
+  return(<>
+    <div className="chat-hdr">
+      <div className="chat-hdr-info">
+        {mobile&&<button className="back-btn" onClick={onBack}>←</button>}
+        {key==="notes"?<div style={{width:44,height:44,borderRadius:"50%",background:"linear-gradient(135deg,#FF8C00,#FF4500)",display:"flex",alignItems:"center",justifyContent:"center",fontSize:22,flexShrink:0}}>📓</div>:<Ava user={otherUser} size={44} showStatus/>}
+        <div><div className="chat-hdr-name">{key==="notes"?"My Notes":otherUser?.nickname||"..."}</div>{key!=="notes"&&<div className={`chat-hdr-sub ${otherUser?.ghostMode?"s-off":"s-on"}`}>{otherUser?.ghostMode?"● Hidden":"● Online"} · #{otherUser?.code}</div>}</div>
+      </div>
+      {key!=="notes"&&<div className="hdr-actions"><button className="hdr-btn" onClick={()=>onCall(otherUser)}>📞</button><button className="hdr-btn">🔐</button></div>}
+    </div>
+    <div className="msgs-area">
+      <div className="date-div"><span>MESSAGES</span></div>
+      {messages.map(m=><MsgBubble key={m.id} msg={m} isOwn={m.from===me.uid} allUsers={allUsers} me={me} onReact={onReact} onEdit={onEdit} onDelete={onDelete} onReply={setReplyTo}/>)}
+      {typing&&<div className="typing-row"><Ava user={otherUser} size={34}/><div className="typing-bub"><div className="dot"/><div className="dot"/><div className="dot"/></div></div>}
+      <div ref={endRef}/>
+    </div>
+    <div className="input-bar">
+      {replyTo&&<div className="reply-banner"><span>↩ <b style={{color:"#FF8C00"}}>{replyTo.slice(0,50)}</b></span><button onClick={()=>setReplyTo(null)} style={{background:"none",border:"none",color:"#555",cursor:"pointer",fontSize:18}}>✕</button></div>}
+      <div className="inp-row">
+        <button className="ico-btn">🎙</button>
+        <input className="msg-inp" placeholder="Message... (E2EE 🔐)" value={input} onChange={e=>setInput(e.target.value)} onKeyDown={e=>e.key==="Enter"&&!e.shiftKey&&send()}/>
+        <button className="ico-btn">📎</button>
+        <button className="send-btn" onClick={send} disabled={!input.trim()}>➤</button>
+      </div>
+    </div>
+  </>);
+}
+
+// ── ADD FRIEND ───────────────────────────────────────────────
+function AddModal({me,onAdd,onClose,showToast}){
+  const [code,setCode]=useState("");const [found,setFound]=useState(null);const [err,setErr]=useState("");const [busy,setBusy]=useState(false);
+  const fb=window._fb;
+  const search=async()=>{
+    setErr("");setFound(null);setBusy(true);
+    try{const u=await fb.findByCode(code.trim());if(u&&u.uid!==me.uid)setFound(u);else setErr("No user found with that code.");}catch{setErr("Search failed.");}
+    setBusy(false);
+  };
+  const add=async()=>{
+    await fb.addContact(me.uid,found.uid);
+    onAdd(found);onClose();showToast(`Added ${found.nickname}! 🎉`);
+  };
+  return(<div className="modal-bd" onClick={e=>e.target===e.currentTarget&&onClose()}><div className="modal-card">
+    <div className="modal-title">ADD BY FRIEND CODE</div>
+    <div style={{fontSize:12,color:"#3a3a3a",marginBottom:13}}>Your code: <span style={{color:"#FF8C00",fontFamily:"monospace",fontSize:14}}>{me.code}</span><br/><span style={{fontSize:10,color:"#2a2a2a"}}>Share this with friends so they can add you</span></div>
+    <div style={{display:"flex",gap:8,marginBottom:11}}>
+      <input className="stg-inp" placeholder="Enter friend's code..." value={code} onChange={e=>setCode(e.target.value)} onKeyDown={e=>e.key==="Enter"&&search()} style={{fontFamily:"monospace",letterSpacing:2}}/>
+      <button className="btn-p" onClick={search} disabled={busy}>{busy?"...":"Find"}</button>
+    </div>
+    {err&&<div style={{color:"#FF3B3B",fontSize:12,marginBottom:8}}>{err}</div>}
+    {found&&<div className="found-row"><div style={{display:"flex",alignItems:"center",gap:11}}><Ava user={found} size={46}/><div><div style={{fontWeight:700,fontSize:15}}>{found.nickname}</div><div style={{fontSize:11,color:"#3a3a3a"}}>#{found.code}</div></div></div><button className="btn-p" onClick={add}>Add ✓</button></div>}
+    <button className="btn-g" onClick={onClose} style={{width:"100%",marginTop:8}}>Cancel</button>
+  </div></div>);
+}
+
+// ── CALL OVERLAY ─────────────────────────────────────────────
+function CallOverlay({callee,onEnd}){
+  const [dur,setDur]=useState(0);
+  const [muted,setMuted]=useState(false);
+  const [phase,setPhase]=useState("ringing");
+  const [volBars,setVolBars]=useState(Array(26).fill(6));
+  const [micErr,setMicErr]=useState("");
+  const durRef=useRef(null);
+  const streamRef=useRef(null);
+  const ctxRef=useRef(null);
+  const animRef=useRef(null);
+  const ringRef=useRef(null);
+  const ringCtxRef=useRef(null);
+  
+  // Play ringtone using Web Audio oscillator
+  const startRingtone=()=>{
+    try{
+      const ctx=new(window.AudioContext||window.webkitAudioContext)();
+      ringCtxRef.current = ctx;
+      const play=(freq,start,d)=>{
+        const o=ctx.createOscillator();
+        const g=ctx.createGain();
+        o.connect(g);
+        g.connect(ctx.destination);
+        o.frequency.value=freq;
+        g.gain.setValueAtTime(0,ctx.currentTime+start);
+        g.gain.linearRampToValueAtTime(.2,ctx.currentTime+start+.01);
+        g.gain.linearRampToValueAtTime(0,ctx.currentTime+start+d-.01);
+        o.start(ctx.currentTime+start);
+        o.stop(ctx.currentTime+start+d);
+      };
+      const pattern=()=>{
+        play(440,0,.4);
+        play(440,.5,.4);
+      };
+      pattern();
+      ringRef.current=setInterval(pattern,3000);
+    }catch(e){
+      console.error('Ringtone error:', e);
+    }
+  };
+  
+  // Request mic and start live volume analyzer
+  const startMic=async()=>{
+    try{
+      const stream=await navigator.mediaDevices.getUserMedia({audio:true,video:false});
+      streamRef.current=stream;
+      
+      const ctx=new(window.AudioContext||window.webkitAudioContext)();
+      ctxRef.current=ctx;
+      
+      const src=ctx.createMediaStreamSource(stream);
+      const analyser=ctx.createAnalyser();
+      analyser.fftSize=64;
+      src.connect(analyser);
+      
+      // Also connect to destination so you can hear yourself (optional - remove if not needed)
+      // src.connect(ctx.destination);
+      
+      const data=new Uint8Array(analyser.frequencyBinCount);
+      const tick=()=>{
+        analyser.getByteFrequencyData(data);
+        setVolBars(Array.from({length:26},(_,i)=>{
+          const v = data[Math.floor(i*data.length/26)] || 0;
+          return Math.max(5, Math.round((v/255)*44));
+        }));
+        animRef.current=requestAnimationFrame(tick);
+      };
+      tick();
+      
+      setMicErr("");
+    }catch(e){
+      console.error('Mic error:', e);
+      setMicErr("🎙 Микрофон заблокирован - симуляция");
+      // Simulate wave anyway
+      animRef.current=setInterval(()=>{
+        setVolBars(Array.from({length:26},()=>Math.round(4+Math.random()*36)));
+      }, 120);
+    }
+  };
+  
+  // On mount: ring for 2.5s then connect
+  useEffect(()=>{
+    startRingtone();
+    const connectTimer=setTimeout(async()=>{
+      clearInterval(ringRef.current);
+      ringCtxRef.current?.close().catch(()=>{});
+      setPhase("connected");
+      await startMic();
+      // Start call timer
+      durRef.current=setInterval(()=>setDur(p=>p+1),1000);
+    }, 2500);
+
+    return()=>{
+      // Full cleanup on unmount
+      clearTimeout(connectTimer);
+      clearInterval(ringRef.current);
+      clearInterval(durRef.current);
+      cancelAnimationFrame(animRef.current);
+      clearInterval(animRef.current);
+      streamRef.current?.getTracks().forEach(t=>t.stop());
+      ctxRef.current?.close().catch(()=>{});
+      ringCtxRef.current?.close().catch(()=>{});
+    };
+  },[]);
+
+  // Mute: disable mic track
+  const toggleMute=()=>{
+    const track=streamRef.current?.getAudioTracks()[0];
+    if(track){
+      track.enabled = !muted; // Toggle opposite of current state
+    }
+    setMuted(p=>!p);
+  };
+
+  // End call: clean up then call onEnd
+  const endCall=()=>{
+    clearInterval(ringRef.current);
+    clearInterval(durRef.current);
+    cancelAnimationFrame(animRef.current);
+    clearInterval(animRef.current);
+    streamRef.current?.getTracks().forEach(t=>t.stop());
+    ctxRef.current?.close().catch(()=>{});
+    ringCtxRef.current?.close().catch(()=>{});
+    onEnd();
+  };
+
+  return(<div style={{position:"fixed",inset:0,zIndex:9999,background:"rgba(0,0,0,.97)",display:"flex",flexDirection:"column",alignItems:"center",justifyContent:"center",touchAction:"none"}}>
+    <div className="call-bg-glow"/>
+    <div className="bg-grid" style={{opacity:.35}}/>
+    <div className="call-ring" style={{position:"relative",zIndex:1}}><Ava user={callee} size={112}/></div>
+    <div className="call-name" style={{position:"relative",zIndex:1}}>{callee?.nickname}</div>
+    <div style={{fontSize:11,color:"#3a3a3a",letterSpacing:3,margin:"6px 0",position:"relative",zIndex:1}}>
+      {phase==="ringing"?"🔔 ЗВОНИМ...":"🎙 ГОЛОСОВОЙ ЗВОНОК · E2EE"}
+    </div>
+    <div className="call-timer" style={{position:"relative",zIndex:1}}>
+      {phase==="ringing"?"Соединение...":fmtT(dur)}
+    </div>
+    
+    {/* Live waveform */}
+    <div className="wave-viz" style={{position:"relative",zIndex:1}}>
+      {volBars.map((h,i)=><div key={i} className="wbar" style={{
+        height: (muted||phase==="ringing") ? "4px" : `${h}px`,
+        opacity: (muted||phase==="ringing") ? .2 : 1,
+        transition:"height .08s ease"
+      }}/>)}
+    </div>
+
+    {micErr&&<div style={{fontSize:11,color:"#FF8C00",marginTop:8,opacity:.7,position:"relative",zIndex:1}}>{micErr}</div>}
+    
+    {phase==="connected" && !micErr && (
+      <div style={{fontSize:11,color:"#00FF00",marginTop:8,position:"relative",zIndex:1,opacity:.6}}>
+        ✓ Микрофон активен
+      </div>
+    )}
+
+    {/* Controls */}
+    <div className="call-ctrls" style={{position:"relative",zIndex:1}}>
+      {/* Mute */}
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+        <button 
+          className={`cbtn ctrl${muted?" on":""}`} 
+          onClick={toggleMute}
+          disabled={phase!=="connected"}
+          style={{touchAction:"manipulation",fontSize:26}}>
+          {muted?"🔇":"🎙"}
+        </button>
+        <div className="ctrl-label">{muted?"Включить":"Выкл звук"}</div>
+      </div>
+
+      {/* END CALL */}
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+        <button
+          className="cbtn end"
+          onPointerDown={e=>{e.preventDefault();e.stopPropagation();endCall();}}
+          style={{touchAction:"manipulation",fontSize:26,cursor:"pointer"}}>
+          📵
+        </button>
+        <div className="ctrl-label">Завершить</div>
+      </div>
+
+      {/* Speaker (visual only) */}
+      <div style={{display:"flex",flexDirection:"column",alignItems:"center"}}>
+        <button 
+          className="cbtn ctrl" 
+          style={{touchAction:"manipulation",fontSize:26,opacity:.5}}>
+          🔊
+        </button>
+        <div className="ctrl-label">Динамик</div>
+      </div>
+    </div>
+
+    {phase==="ringing"&&(
+      <div style={{marginTop:24,fontSize:12,color:"#555",letterSpacing:2,position:"relative",zIndex:1}}>
+        Нажмите 📵 чтобы отменить
+      </div>
+    )}
+  </div>);
+}
+
+// ── FEED ─────────────────────────────────────────────────────
+function Feed({me,allUsers}){
+  const [txt,setTxt]=useState("");const [posts,setPosts]=useState([]);const fb=window._fb;
+  useEffect(()=>{if(!fb)return;return fb.listenFeed(setPosts);},[]);
+  const post=async()=>{if(!txt.trim())return;await fb.addPost({uid:me.uid,text:txt.trim(),ts:new Date(),glows:[],reechos:[]});setTxt("");};
+  const glow=async p=>{const arr=p.glows||[];const newArr=arr.includes(me.uid)?arr.filter(u=>u!==me.uid):[...arr,me.uid];await fb.updatePost(p.id,{glows:newArr});};
+  const reecho=async p=>{const arr=p.reechos||[];const newArr=arr.includes(me.uid)?arr.filter(u=>u!==me.uid):[...arr,me.uid];await fb.updatePost(p.id,{reechos:newArr});};
+  return(<div className="page-scroll"><div className="page-title">ECHO FEED</div>
+    <div className="compose-card"><div style={{display:"flex",gap:12,marginBottom:12}}><Ava user={me} size={42} story/><textarea className="compose-ta" placeholder="What's happening in the ECHO-verse? 📡" value={txt} onChange={e=>setTxt(e.target.value)}/></div><div style={{display:"flex",justifyContent:"flex-end"}}><button className="btn-p" onClick={post} disabled={!txt.trim()}>⚡ Echo It</button></div></div>
+    {posts.map(p=>{const auth=allUsers[p.uid]||{nickname:"Unknown",avatar:"👤"};const glowed=(p.glows||[]).includes(me.uid);const reechoed=(p.reechos||[]).includes(me.uid);return(<div key={p.id} className="post-card"><div style={{display:"flex",gap:12}}><Ava user={auth} size={42} story={p.uid===me.uid} showStatus/><div style={{flex:1}}><div style={{display:"flex",alignItems:"center",gap:8,flexWrap:"wrap"}}><span style={{fontWeight:700,fontSize:14}}>{auth.nickname}</span><span style={{fontSize:11,color:"#222"}}>#{auth.code}</span><span style={{marginLeft:"auto",fontSize:11,color:"#222"}}>{ago(tsMs(p.ts))}</span></div><div className="post-text">{p.text}</div><div className="post-acts"><button className={`pa-btn${glowed?" active":""}`} onClick={()=>glow(p)}>⚡ {(p.glows||[]).length} Glow</button><button className={`pa-btn${reechoed?" active":""}`} onClick={()=>reecho(p)}>📡 {(p.reechos||[]).length} Re-echo</button></div></div></div></div>);})}
+  </div>);
+}
+
+// ── CHANNELS ─────────────────────────────────────────────────
+function Channels({me,showToast}){
+  const [channels,setChannels]=useState([]);
+  const [myChannels,setMyChannels]=useState([]);
+  const [code,setCode]=useState("");
+  const [err,setErr]=useState("");
+  const [showCreate,setShowCreate]=useState(false);
+  const [newName,setNewName]=useState("");
+  const [newDesc,setNewDesc]=useState("");
+  const [newIcon,setNewIcon]=useState("💬");
+  const fb=window._fb;
+  
+  const ICONS=["💬","⚡","🔥","🎮","📡","🎵","📚","🎨","🏀","🍕","🌙","🚀","💎","🌟","🎯","👾"];
+  
+  // Load all public channels + user's channels from Firestore
+  useEffect(()=>{
+    if(!fb)return;
+    // Listen to public channels
+    const unsub1=fb.listenChannels(chans=>setChannels(chans));
+    // Listen to user's created channels
+    const unsub2=fb.listenMyChannels(me.uid,chans=>setMyChannels(chans));
+    return()=>{unsub1&&unsub1();unsub2&&unsub2();};
+  },[me.uid]);
+  
+  const joinByCode=async()=>{
+    if(!code.trim()){setErr("Enter channel code");return;}
+    const chan=channels.find(c=>c.code===code.trim().toUpperCase());
+    if(chan){
+      await fb.joinChannel(chan.id,me.uid);
+      setCode("");setErr("");
+      showToast(`Joined ${chan.name}! 🎉`);
+    } else {
+      setErr("Channel not found");
+    }
+  };
+  
+  const createChannel=async()=>{
+    if(!newName.trim()){setErr("Channel name required");return;}
+    const channelCode=Math.random().toString(36).slice(2,9).toUpperCase();
+    const chan={
+      name:newName.trim(),
+      desc:newDesc.trim()||"No description",
+      icon:newIcon,
+      code:channelCode,
+      creator:me.uid,
+      members:[me.uid],
+      createdAt:new Date()
+    };
+    await fb.createChannel(chan);
+    setShowCreate(false);
+    setNewName("");setNewDesc("");setNewIcon("💬");setErr("");
+    showToast(`Channel created! Code: ${channelCode}`);
+  };
+  
+  const toggleJoin=async(chan)=>{
+    const joined=chan.members?.includes(me.uid);
+    if(joined){
+      await fb.leaveChannel(chan.id,me.uid);
+    } else {
+      await fb.joinChannel(chan.id,me.uid);
+    }
+  };
+  
+  const allChans=[...myChannels,...channels.filter(c=>!myChannels.find(m=>m.id===c.id))];
+  
+  return(<div className="page-scroll"><div className="page-title">CHANNELS & GROUP CHATS</div>
+    
+    {/* Create Channel Button */}
+    <button className="btn-p" onClick={()=>setShowCreate(!showCreate)} style={{width:"100%",marginBottom:14,padding:14,fontSize:14}}>
+      {showCreate?"✕ Cancel":"+ Create Your Channel"}
+    </button>
+    
+    {/* Create Channel Form */}
+    {showCreate&&<div style={{background:"rgba(8,8,8,.95)",border:"1px solid rgba(255,140,0,.15)",borderRadius:16,padding:20,marginBottom:14}}>
+      <div style={{fontSize:12,color:"#FF8C00",fontFamily:"'Orbitron',monospace",letterSpacing:2,marginBottom:14}}>CREATE NEW CHANNEL</div>
+      <div style={{marginBottom:12}}><div style={{fontSize:12,color:"#666",marginBottom:6}}>Channel Name</div><input className="stg-inp" placeholder="e.g. Gaming Squad" value={newName} onChange={e=>setNewName(e.target.value)}/></div>
+      <div style={{marginBottom:12}}><div style={{fontSize:12,color:"#666",marginBottom:6}}>Description</div><input className="stg-inp" placeholder="What's this channel about?" value={newDesc} onChange={e=>setNewDesc(e.target.value)}/></div>
+      <div style={{marginBottom:14}}><div style={{fontSize:12,color:"#666",marginBottom:8}}>Icon</div><div style={{display:"flex",flexWrap:"wrap",gap:8}}>{ICONS.map(i=><button key={i} onClick={()=>setNewIcon(i)} style={{width:42,height:42,borderRadius:"50%",border:`2px solid ${newIcon===i?"#FF8C00":"rgba(255,140,0,.15)"}`,background:newIcon===i?"rgba(255,140,0,.15)":"transparent",fontSize:20,cursor:"pointer",transition:"all .2s"}}>{i}</button>)}</div></div>
+      <button className="btn-p" onClick={createChannel} style={{width:"100%",padding:12}}>Create Channel ✓</button>
+    </div>}
+    
+    {/* Join by Code */}
+    <div style={{display:"flex",gap:8,marginBottom:14}}>
+      <input className="stg-inp" placeholder="Enter channel code..." value={code} onChange={e=>setCode(e.target.value.toUpperCase())} onKeyDown={e=>e.key==="Enter"&&joinByCode()} style={{textTransform:"uppercase",letterSpacing:1}}/>
+      <button className="btn-p" onClick={joinByCode} style={{padding:"0 20px"}}>Join</button>
+    </div>
+    {err&&<div style={{color:"#FF3B3B",fontSize:12,marginBottom:12,padding:"8px 12px",background:"rgba(255,59,59,.08)",borderRadius:8}}>{err}</div>}
+    
+    {/* Channels List */}
+    <div className="sect-lbl">ALL CHANNELS</div>
+    {allChans.length===0&&<div style={{padding:"20px",textAlign:"center",fontSize:13,color:"#3a3a3a"}}>No channels yet. Create one above! ⬆️</div>}
+    {allChans.map(ch=>{
+      const joined=ch.members?.includes(me.uid);
+      const isCreator=ch.creator===me.uid;
+      return(<div key={ch.id} className="ch-card">
+        <div style={{display:"flex",alignItems:"center",gap:14}}>
+          <div className="ch-icon">{ch.icon}</div>
+          <div style={{flex:1}}>
+            <div style={{fontWeight:700,fontSize:15,color:"#ddd"}}>{ch.name} {isCreator&&<span style={{fontSize:10,color:"#FF8C00",marginLeft:6}}>YOUR CHANNEL</span>}</div>
+            <div style={{fontSize:12,color:"#3a3a3a",marginTop:2}}>{ch.desc}</div>
+            <div style={{fontSize:11,color:"#FF8C00",marginTop:4}}>{(ch.members?.length||0)} members · #{ch.code}</div>
+          </div>
+        </div>
+        <button className={joined?"btn-d":"btn-p"} onClick={()=>toggleJoin(ch)} style={{padding:"10px 16px"}}>{joined?"Leave":"Join"}</button>
+      </div>);
+    })}
+  </div>);
+}
+
+// ── CALLS ────────────────────────────────────────────────────
+function Calls({contacts,allUsers,onCall}){
+  return(<div className="page-scroll"><div className="page-title">CALLS</div>
+    <div className="sect-lbl">CONTACTS</div>
+    {contacts.map(u=><div key={u.uid} className="call-card"><div style={{display:"flex",alignItems:"center",gap:12}}><Ava user={u} size={44} showStatus/><div><div style={{fontWeight:700,fontSize:14}}>{u.nickname}</div><div style={{fontSize:12,color:u.ghostMode?"#222":"#FF8C00",marginTop:2}}>{u.ghostMode?"● Hidden":"● Online"}</div></div></div><button className="btn-p" onClick={()=>onCall(u)}>📞 Call</button></div>)}
+    {contacts.length===0&&<div style={{fontSize:13,color:"#2d2d2d",textAlign:"center",padding:"20px 0"}}>No contacts yet. Add friends to call them!</div>}
+  </div>);
+}
+
+// ── SETTINGS ─────────────────────────────────────────────────
+function Settings({me,setMe,onLogout,showToast}){
+  const [nick,setNick]=useState(me.nickname);const [glow,setGlow]=useState(me.glowIntensity||20);const [ghost,setGhost]=useState(me.ghostMode||false);const [destruct,setDestruct]=useState(me.selfDestruct||null);const [busy,setBusy]=useState(false);
+  const [trustedInfo, setTrustedInfo]=useState(null);
+  const [uploading, setUploading]=useState(false);
+  const fileInputRef=useRef(null);
+  const fb=window._fb;
+  
+  // Check trusted device status
+  useEffect(()=>{
+    const trusted = localStorage.getItem("echo_trusted_device");
+    if(trusted){
+      try{
+        const data = JSON.parse(trusted);
+        if(Date.now() < data.expiry){
+          const daysLeft = Math.ceil((data.expiry - Date.now()) / (24*60*60*1000));
+          setTrustedInfo({active:true, daysLeft, email:data.email});
+        } else {
+          localStorage.removeItem("echo_trusted_device");
+          setTrustedInfo({active:false});
+        }
+      }catch{setTrustedInfo({active:false});}
+    } else {
+      setTrustedInfo({active:false});
+    }
+  },[]);
+  
+  const removeTrust = () => {
+    localStorage.removeItem("echo_trusted_device");
+    setTrustedInfo({active:false});
+    showToast("Device trust removed");
+  };
+  
+  const handleFileUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if(!file) return;
+    
+    // Check file type
+    const validTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+    if(!validTypes.includes(file.type)){
+      showToast("❌ Только JPG, PNG, GIF, WEBP");
+      e.target.value = ''; // Reset input
+      return;
+    }
+    
+    // Check file size (max 5MB)
+    if(file.size > 5 * 1024 * 1024){
+      showToast("❌ Максимум 5МБ");
+      e.target.value = ''; // Reset input
+      return;
+    }
+    
+    setUploading(true);
+    showToast("📷 Загружаем фото...");
+    
+    try{
+      // Convert to base64
+      const reader = new FileReader();
+      reader.onload = async (event) => {
+        try {
+          const base64 = event.target.result;
+          
+          // Compress/resize image
+          const img = new Image();
+          img.onload = async () => {
+            try {
+              const canvas = document.createElement('canvas');
+              const MAX_SIZE = 400;
+              let width = img.width;
+              let height = img.height;
+              
+              // Calculate new dimensions maintaining aspect ratio
+              if(width > height){
+                if(width > MAX_SIZE){
+                  height *= MAX_SIZE / width;
+                  width = MAX_SIZE;
+                }
+              } else {
+                if(height > MAX_SIZE){
+                  width *= MAX_SIZE / height;
+                  height = MAX_SIZE;
+                }
+              }
+              
+              canvas.width = width;
+              canvas.height = height;
+              const ctx = canvas.getContext('2d');
+              ctx.drawImage(img, 0, 0, width, height);
+              
+              const compressedBase64 = canvas.toDataURL('image/jpeg', 0.8);
+              
+              // Save to Firebase
+              const u = {...me, avatar: compressedBase64};
+              await fb.setUser(me.uid, u);
+              setMe(u);
+              showToast("✅ Фото загружено!");
+              setUploading(false);
+              e.target.value = ''; // Reset input for next upload
+            } catch(err) {
+              console.error('Canvas error:', err);
+              showToast("❌ Ошибка обработки фото");
+              setUploading(false);
+              e.target.value = '';
+            }
+          };
+          img.onerror = () => {
+            showToast("❌ Не удалось загрузить фото");
+            setUploading(false);
+            e.target.value = '';
+          };
+          img.src = base64;
+        } catch(err) {
+          console.error('Reader error:', err);
+          showToast("❌ Ошибка чтения файла");
+          setUploading(false);
+          e.target.value = '';
+        }
+      };
+      reader.onerror = () => {
+        showToast("❌ Не удалось прочитать файл");
+        setUploading(false);
+        e.target.value = '';
+      };
+      reader.readAsDataURL(file);
+    } catch(err){
+      console.error('Upload error:', err);
+      showToast("❌ Ошибка загрузки");
+      setUploading(false);
+      e.target.value = '';
+    }
+  };
+  
+  const save=async()=>{
+    setBusy(true);
+    const u={...me,nickname:nick,glowIntensity:glow,ghostMode:ghost,selfDestruct:destruct};
+    await fb.setUser(me.uid,u);setMe(u);showToast("Settings saved ✓");setBusy(false);
+  };
+  const resetCode=async()=>{const u={...me,code:gcode()};await fb.setUser(me.uid,u);setMe(u);showToast("Code reset!");};
+  return(<div className="page-scroll"><div className="page-title">SETTINGS</div>
+    <div className="stg-section">
+      <div className="stg-lbl">PROFILE</div>
+      <div style={{display:"flex",alignItems:"center",gap:16,marginBottom:18}}><Ava user={me} size={66} story/><div><div style={{fontWeight:700,fontSize:17,color:"#f0f0f0"}}>{me.nickname}</div><div style={{fontSize:12,color:"#2d2d2d",marginTop:4}}>Friend Code: <span style={{color:"#FF8C00",fontFamily:"monospace"}}>{me.code}</span></div><button className="btn-g" style={{marginTop:9,padding:"6px 13px",fontSize:12}} onClick={resetCode}>↻ Reset Code</button></div></div>
+      <div style={{marginBottom:13}}><div style={{fontSize:12,color:"#2d2d2d",marginBottom:7}}>Nickname</div><input className="stg-inp" value={nick} onChange={e=>setNick(e.target.value)}/></div>
+      
+      {/* Avatar Selection */}
+      <div>
+        <div style={{fontSize:12,color:"#2d2d2d",marginBottom:7}}>Avatar</div>
+        
+        {/* Upload Photo Button */}
+        <input 
+          ref={fileInputRef}
+          type="file" 
+          accept="image/jpeg,image/jpg,image/png,image/gif,image/webp"
+          onChange={handleFileUpload}
+          style={{display:"none"}}
+        />
+        <button 
+          className="btn-p" 
+          onClick={()=>fileInputRef.current?.click()} 
+          disabled={uploading}
+          style={{
+            width:"100%",
+            marginBottom:12,
+            padding:14,
+            fontSize:14,
+            fontWeight:700,
+            display:"flex",
+            alignItems:"center",
+            justifyContent:"center",
+            gap:10,
+            background: uploading 
+              ? "rgba(255,140,0,.15)" 
+              : "linear-gradient(135deg,rgba(255,140,0,.2),rgba(255,80,0,.15))",
+            border: "2px dashed rgba(255,140,0,.4)",
+            boxShadow: "0 0 20px rgba(255,140,0,.1)"
+          }}
+        >
+          {uploading ? (
+            <>⏳ Загрузка...</>
+          ) : (
+            <>📷 Загрузить своё фото</>
+          )}
+        </button>
+        
+        {/* Current Photo Preview */}
+        {me.avatar?.startsWith("data:image") && (
+          <div style={{
+            marginBottom:12,
+            padding:12,
+            background:"rgba(255,140,0,.05)",
+            border:"1px solid rgba(255,140,0,.15)",
+            borderRadius:12,
+            display:"flex",
+            alignItems:"center",
+            gap:12
+          }}>
+            <div style={{
+              width:60,
+              height:60,
+              borderRadius:"50%",
+              backgroundImage:`url(${me.avatar})`,
+              backgroundSize:"cover",
+              backgroundPosition:"center",
+              border:"2px solid #FF8C00",
+              flexShrink:0
+            }}/>
+            <div style={{flex:1}}>
+              <div style={{fontSize:13,color:"#FF8C00",fontWeight:600,marginBottom:4}}>✓ Custom Photo Active</div>
+              <div style={{fontSize:11,color:"#666"}}>Click emoji below to switch back</div>
+            </div>
+          </div>
+        )}
+        
+        {/* Emoji Avatars */}
+        <div style={{fontSize:12,color:"#666",marginBottom:8}}>Или выбери эмодзи:</div>
+        <div className="ava-grid">
+          {AVAS.map(a=><button key={a} className={`ava-sel${me.avatar===a?" on":""}`} onClick={async()=>{const u={...me,avatar:a};await fb.setUser(me.uid,u);setMe(u);}}>{a}</button>)}
+        </div>
+        
+        <div style={{fontSize:11,color:"#555",marginTop:10,padding:"10px 12px",background:"rgba(255,140,0,.04)",borderRadius:8,lineHeight:1.7}}>
+          💡 <b style={{color:"#FF8C00"}}>Поддерживаются:</b> JPG, PNG, GIF, WEBP<br/>
+          📏 <b style={{color:"#FF8C00"}}>Максимум:</b> 5 МБ (автоматически сжимается до 400px)<br/>
+          🔒 <b style={{color:"#FF8C00"}}>Хранится:</b> В Firebase (доступно на всех устройствах)
+        </div>
+      </div>
+    </div>
+    <div className="stg-section">
+      <div className="stg-lbl">VIBE CONTROL</div>
+      <div style={{fontSize:12,color:"#2d2d2d",marginBottom:8}}>Glow: <b style={{color:"#FF8C00"}}>{glow}px</b></div>
+      <input type="range" min={5} max={60} value={glow} onChange={e=>setGlow(+e.target.value)} style={{width:"100%",accentColor:"#FF8C00",cursor:"pointer"}}/>
+      <div className="glow-prev" style={{boxShadow:`0 0 ${glow}px rgba(255,140,0,.5),0 0 ${glow*2}px rgba(255,140,0,.2)`}}>ECHO GLOW PREVIEW ⚡</div>
+    </div>
+    <div className="stg-section">
+      <div className="stg-lbl">PRIVACY</div>
+      <div className="tgl-row"><div><div style={{fontWeight:600,fontSize:14}}>👻 Ghost Mode</div><div style={{fontSize:12,color:"#2d2d2d",marginTop:2}}>Hide online status from everyone</div></div><div className={`tgl${ghost?" on":""}`} onClick={()=>setGhost(g=>!g)}><div className="tgl-thumb"/></div></div>
+      <div className="tgl-row"><div><div style={{fontWeight:600,fontSize:14}}>💣 Self-Destruct</div><div style={{fontSize:12,color:"#2d2d2d",marginTop:2}}>Auto-delete messages</div></div><select value={destruct||""} onChange={e=>setDestruct(e.target.value||null)} style={{background:"rgba(255,140,0,.06)",border:"1px solid rgba(255,140,0,.2)",borderRadius:10,color:"#ddd",padding:"8px 12px",fontSize:13,outline:"none",cursor:"pointer"}}><option value="">Off</option><option value="1min">1 minute</option><option value="1hour">1 hour</option></select></div>
+      
+      {/* Trusted Device Status */}
+      {trustedInfo && <div style={{marginTop:16,padding:"14px 16px",background:trustedInfo.active?"rgba(255,140,0,.06)":"rgba(255,255,255,.02)",border:"1px solid "+(trustedInfo.active?"rgba(255,140,0,.15)":"rgba(255,255,255,.04)"),borderRadius:12}}>
+        <div style={{display:"flex",alignItems:"center",justifyContent:"space-between",marginBottom:6}}>
+          <div style={{fontSize:13,fontWeight:600,color:trustedInfo.active?"#FF8C00":"#555"}}>
+            {trustedInfo.active?"🔒 Trusted Device":"🔓 Device Not Trusted"}
+          </div>
+          {trustedInfo.active && <button className="btn-d" style={{padding:"5px 10px",fontSize:11}} onClick={removeTrust}>Remove</button>}
+        </div>
+        <div style={{fontSize:11,color:trustedInfo.active?"#666":"#3a3a3a",lineHeight:1.6}}>
+          {trustedInfo.active 
+            ? `This device is trusted for ${trustedInfo.daysLeft} more days. You won't need to enter your password.`
+            : "Check 'Trust this device' when logging in to skip entering password for 30 days."
+          }
+        </div>
+      </div>}
+    </div>
+    <div style={{display:"flex",gap:10,paddingBottom:24}}>
+      <button className="btn-p" style={{flex:1,padding:14}} onClick={save} disabled={busy}>{busy?"Saving...":"Save Changes"}</button>
+      <button className="btn-d" onClick={onLogout}>Logout</button>
+    </div>
+  </div>);
+}
+
+// ── ROOT APP ─────────────────────────────────────────────────
+function EchoApp(){
+  const [ready,   setReady]   = useState(false);
+  const [me,      setMeRaw]   = useState(null);
+  const [allUsers,setAllUsers]= useState({});
+  const [contactObjs,setContactObjs]=useState([]); // full user objects
+  const [tab,     setTab]     = useState("chats");
+  const [selected,setSelected]= useState(null);
+  const [addModal,setAddModal]= useState(false);
+  const [call,    setCall]    = useState(null);
+  const [chatOpen,setChatOpen]= useState(false);
+  const [isMobile,setIsMobile]= useState(window.innerWidth<=700);
+  const [toast,   setToast]   = useState("");
+  const fb = window._fb;
+  const unsubRefs = useRef([]);
+
+  useEffect(()=>{const fn=()=>setIsMobile(window.innerWidth<=700);window.addEventListener("resize",fn);return()=>window.removeEventListener("resize",fn);},[]);
+
+  // Firebase auth state listener
+  useEffect(()=>{
+    if(!fb){setReady(true);return;}
+    const unsub=fb.onAuth(async fbUser=>{
+      if(fbUser){
+        try{
+          const snap=await fb.getUser(fbUser.uid);
+          if(snap.exists()){
+            const u={uid:fbUser.uid,...snap.data()};
+            setMeRaw(u);
+            setAllUsers(p=>({...p,[u.uid]:u}));
+            loadContacts(u);
+          }
+        }catch(e){console.error(e);}
+      } else {
+        setMeRaw(null);setContactObjs([]);setAllUsers({});
+        unsubRefs.current.forEach(u=>u&&u());unsubRefs.current=[];
+      }
+      setReady(true);
+    });
+    return unsub;
+  },[]);
+
+  const loadContacts=useCallback(async(user)=>{
+    const contacts=user.contacts||[];
+    // Subscribe to each contact's live profile
+    unsubRefs.current.forEach(u=>u&&u());unsubRefs.current=[];
+    const objs=[];
+    for(const uid of contacts){
+      const unsub=fb.listenUser(uid, u=>{
+        setAllUsers(p=>({...p,[u.uid]:u}));
+        setContactObjs(prev=>{const idx=prev.findIndex(x=>x.uid===u.uid);if(idx>=0){const n=[...prev];n[idx]=u;return n;}return[...prev,u];});
+      });
+      unsubRefs.current.push(unsub);
+    }
+    if(contacts.length>0&&!selected){
+      setSelected(ckey(user.uid,contacts[0]));
+    }
+  },[]);
+
+  const setMe=useCallback(u=>{setMeRaw(u);setAllUsers(p=>({...p,[u.uid]:u}));},[]);
+
+  const showToast=useCallback(msg=>{setToast(msg);setTimeout(()=>setToast(""),2500);},[]);
+
+  const login=useCallback(u=>{
+    setMeRaw(u);setAllUsers(p=>({...p,[u.uid]:u}));loadContacts(u);
+  },[]);
+
+  const logout=useCallback(()=>{
+    fb.signOut();setMeRaw(null);setContactObjs([]);setSelected(null);setTab("chats");setChatOpen(false);
+  },[]);
+
+  const addContact=useCallback(u=>{
+    setContactObjs(p=>p.find(x=>x.uid===u.uid)?p:[...p,u]);
+    setAllUsers(p=>({...p,[u.uid]:u}));
+    setMeRaw(prev=>{const updated={...prev,contacts:[...new Set([...(prev.contacts||[]),u.uid])]};return updated;});
+    if(me){const k=ckey(me.uid,u.uid);setSelected(k);if(isMobile)setChatOpen(true);}
+    // Subscribe to their live profile
+    const unsub=fb.listenUser(u.uid,updated=>{setAllUsers(p=>({...p,[updated.uid]:updated}));setContactObjs(prev=>{const idx=prev.findIndex(x=>x.uid===updated.uid);if(idx>=0){const n=[...prev];n[idx]=updated;return n;}return[...prev,updated];});});
+    unsubRefs.current.push(unsub);
+  },[me,isMobile]);
+
+  const handleSelectChat=k=>{setSelected(k);if(isMobile)setChatOpen(true);};
+  const handleBack=()=>setChatOpen(false);
+  const handleTabChange=t=>{setTab(t);if(isMobile)setChatOpen(false);};
+
+  // Build messages map from live contact keys (for preview in contact list)
+  const [msgPreviews,setMsgPreviews]=useState({});
+
+  if(!window._FB_READY)return(<><style>{CSS}</style><div className="bg-grid"/><div className="orb orb1"/><div className="orb orb2"/><SetupScreen/></>);
+  if(!ready)return(<><style>{CSS}</style><div className="loading-screen"><div className="bg-grid"/><div className="orb orb1"/><div className="orb orb2"/><div className="loading-logo">ECHO</div><div className="loading-bar-wrap"><div className="loading-bar"/></div></div></>);
+  if(!me)return(<><style>{CSS}</style><Auth onLogin={login}/></>);
+
+  return(<>
+    <style>{CSS}</style>
+    <div id="er">
+      <div className="bg-grid"/><div className="orb orb1"/><div className="orb orb2"/>
+      <Toast msg={toast}/>
+      {call&&<CallOverlay callee={call} onEnd={()=>setCall(null)}/>}
+      {addModal&&<AddModal me={me} onAdd={addContact} onClose={()=>setAddModal(false)} showToast={showToast}/>}
+      <div className="app-shell">
+        <NavRail tab={tab} setTab={handleTabChange} user={me}/>
+        <div style={{flex:1,display:"flex",flexDirection:"column",overflow:"hidden",minWidth:0}}>
+          <div className="content-area">
+            {tab==="chats"&&(<>
+              <ContactPanel me={me} contacts={contactObjs.map(u=>u.uid)} allUsers={allUsers} messages={msgPreviews} selected={selected} setSelected={handleSelectChat} onAdd={()=>setAddModal(true)} mobile={isMobile} chatOpen={chatOpen}/>
+              <div className={`chat-main${isMobile&&chatOpen?" slide-in":""}`}>
+                <ChatView chatKey={selected} me={me} allUsers={allUsers} onCall={setCall} onBack={handleBack} mobile={isMobile} showToast={showToast}/>
+              </div>
+            </>)}
+            {tab!=="chats"&&<div className="chat-main" style={{transform:"none"}}>
+              {tab==="feed"     &&<Feed me={me} allUsers={allUsers}/>}
+              {tab==="channels" &&<Channels me={me} showToast={showToast}/>}
+              {tab==="calls"    &&<Calls contacts={contactObjs} allUsers={allUsers} onCall={setCall}/>}
+              {tab==="settings" &&<Settings me={me} setMe={setMe} onLogout={logout} showToast={showToast}/>}
+            </div>}
+          </div>
+          <BottomNav tab={tab} setTab={handleTabChange}/>
+        </div>
+      </div>
+    </div>
+  </>);
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<EchoApp/>);
+</script>
+</body>
+</html>
